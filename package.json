@@ -2,12 +2,12 @@
     "name": "project-nova",
     "private": true,
     "version": "0.1.0",
-    "main": "electron/main.js",
+    "main": "electron/main.cjs",
     "type": "module",
     "scripts": {
         "dev": "vite",
         "build": "tsc -b && vite build",
-        "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:4000 && electron .\"",
+        "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:4000 && electron electron/main.cjs\"",
         "electron:build": "tsc -b && vite build && electron-builder",
         "lint": "eslint .",
         "preview": "vite preview"
@@ -17,10 +17,13 @@
         "@tanstack/react-query": "^5.90.12",
         "@tanstack/react-table": "^8.20.0",
         "@types/dagre": "^0.7.53",
+        "@types/papaparse": "^5.5.1",
         "@xyflow/react": "^12.10.0",
         "clsx": "^2.1.0",
         "dagre": "^0.8.5",
         "lucide-react": "^0.344.0",
+        "papaparse": "^5.5.3",
+        "pg": "^8.16.3",
         "react": "^18.3.1",
         "react-dom": "^18.3.1",
         "react-router-dom": "^6.22.3",
@@ -42,5 +45,25 @@
         "typescript": "^5.2.2",
         "vite": "^5.1.4",
         "wait-on": "^9.0.3"
+    },
+    "build": {
+        "appId": "com.projectnexus.app",
+        "productName": "Project Nexus",
+        "directories": {
+            "output": "release"
+        },
+        "files": [
+            "dist/**/*",
+            "electron/**/*"
+        ],
+        "mac": {
+            "target": "dmg"
+        },
+        "win": {
+            "target": "nsis"
+        },
+        "linux": {
+            "target": "AppImage"
+        }
     }
 }

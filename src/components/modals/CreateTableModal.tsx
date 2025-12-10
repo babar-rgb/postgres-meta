@@ -1,7 +1,10 @@
 import { useState } from 'react';
-import { X, Plus, Trash2, Loader2, Save } from 'lucide-react';
-import { useSql } from '../../hooks/useSql'; // Assuming useSql is in ../../hooks/useSql
+import { X, Plus, Trash2, Loader2, Save, Upload, FileSpreadsheet, Wand2 } from 'lucide-react';
+import { useSql } from '../../hooks/useSql';
 import { generateTableSQL, ColumnDef } from '../../utils/sqlGenerator';
+import { inferSchemaFromRows } from '../../utils/schemaInference';
+import { parseCsv } from '../../utils/csvHelpers';
+import { api } from '../../lib/api';
 import { useQueryClient } from '@tanstack/react-query';
 
 interface CreateTableModalProps {
@@ -28,15 +31,59 @@ export default function CreateTableModal({ isOpen, onClose }: CreateTableModalPr
     const [tableName, setTableName] = useState('');
     const [enableRLS, setEnableRLS] = useState(true);
 
-    // Default columns: id and created_at
     const [columns, setColumns] = useState<ColumnDef[]>([
         { name: 'id', type: 'int8', isPrimaryKey: true, isNullable: false, isIdentity: true },
         { name: 'created_at', type: 'timestamptz', defaultValue: 'now()', isPrimaryKey: false, isNullable: false }
     ]);
 
+    // CSV Import State
+    const [importData, setImportData] = useState<any[] | null>(null);
+    const [isParsing, setIsParsing] = useState(false);
+    const [isImportingData, setIsImportingData] = useState(false);
+
     const [error, setError] = useState<string | null>(null);
 
     if (!isOpen) return null;
+
+    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        setIsParsing(true);
+        setError(null);
+        try {
+            // 1. Parse CSV
+            const data = await parseCsv(file);
+            if (data.length === 0) throw new Error("CSV is empty");
+
+            // 2. Infer Schema
+            const inferredUserColumns = inferSchemaFromRows(data);
+
+            // 3. Merge with default columns (id, created_at) if they don't exist in CSV
+            // Ideally we keep the CSV structure as primary.
+            // Let's replace the whole schema with inferred one, but ensure ID exists if possible?
+            // Actually, Supabase usually ADDs id and created_at. Let's keep them but deduplicate.
+
+            const reserved = ['id', 'created_at'];
+            const finalColumns = [
+                { name: 'id', type: 'int8', isPrimaryKey: true, isNullable: false, isIdentity: true },
+                { name: 'created_at', type: 'timestamptz', defaultValue: 'now()', isPrimaryKey: false, isNullable: false },
+                ...inferredUserColumns.filter(c => !reserved.includes(c.name))
+            ];
+
+            setColumns(finalColumns);
+            setImportData(data); // Store data for later insertion
+
+            // Auto-guess table name from filename
+            const cleanName = file.name.replace('.csv', '').replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+            setTableName(cleanName);
+
+        } catch (err: any) {
+            setError(err.message || "Failed to parse CSV");
+        } finally {
+            setIsParsing(false);
+        }
+    };
 
     const handleAddColumn = () => {
         setColumns([...columns, { name: '', type: 'text', isPrimaryKey: false, isNullable: true }]);
@@ -65,15 +112,40 @@ export default function CreateTableModal({ isOpen, onClose }: CreateTableModalPr
             });
 
             executeSql(sql, {
-                onSuccess: () => {
+                onSuccess: async () => {
+                    // If we have data to import, do it now!
+                    if (importData && importData.length > 0) {
+                        setIsImportingData(true);
+                        try {
+                            // We need to sanitize data to match column types?
+                            // Postgres is somewhat lenient with string->type coercion if format is correct.
+                            // CSV helper unparses empty strings to null? No, we might need to do that.
+                            const sanitized = importData.map(row => {
+                                const newRow: any = {};
+                                Object.keys(row).forEach(k => {
+                                    // Skip columns not in schema?
+                                    // Or ensure keys match column names. 
+                                    // Note: inferSchemaFromRows uses exact CSV keys.
+                                    if (row[k] === '') newRow[k] = null;
+                                    else newRow[k] = row[k];
+                                });
+                                return newRow;
+                            });
+
+                            await api.insertRows(tableName, sanitized);
+                        } catch (importErr: any) {
+                            console.error("Import failed after create", importErr);
+                            setError("Table created, but data import failed: " + importErr.message);
+                            setIsImportingData(false);
+                            queryClient.invalidateQueries({ queryKey: ['tables'] });
+                            return; // Don't close if import failed, let user see error
+                        }
+                        setIsImportingData(false);
+                    }
+
                     queryClient.invalidateQueries({ queryKey: ['tables'] });
                     onClose();
-                    // Reset form
-                    setTableName('');
-                    setColumns([
-                        { name: 'id', type: 'int8', isPrimaryKey: true, isNullable: false, isIdentity: true },
-                        { name: 'created_at', type: 'timestamptz', defaultValue: 'now()', isPrimaryKey: false, isNullable: false }
-                    ]);
+                    resetForm();
                 },
                 onError: (err) => {
                     setError(err instanceof Error ? err.message : 'Unknown error');
@@ -82,6 +154,15 @@ export default function CreateTableModal({ isOpen, onClose }: CreateTableModalPr
         } catch (e) {
             setError(e instanceof Error ? e.message : 'Invalid configuration');
         }
+    };
+
+    const resetForm = () => {
+        setTableName('');
+        setColumns([
+            { name: 'id', type: 'int8', isPrimaryKey: true, isNullable: false, isIdentity: true },
+            { name: 'created_at', type: 'timestamptz', defaultValue: 'now()', isPrimaryKey: false, isNullable: false }
+        ]);
+        setImportData(null);
     };
 
     return (
@@ -98,6 +179,43 @@ export default function CreateTableModal({ isOpen, onClose }: CreateTableModalPr
 
                 {/* Body */}
                 <div className="flex-1 overflow-auto p-6 space-y-6">
+
+                    {/* CSV Upload Section */}
+                    <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-4 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                            <div className="p-2 bg-blue-500/20 rounded-lg">
+                                <Wand2 size={20} className="text-blue-400" />
+                            </div>
+                            <div>
+                                <h3 className="text-sm font-medium text-white">Magic Import</h3>
+                                <p className="text-xs text-subtle">Upload a CSV to auto-generate columns and import data.</p>
+                            </div>
+                        </div>
+                        <div>
+                            <input
+                                type="file"
+                                id="csv-create-upload"
+                                className="hidden"
+                                accept=".csv"
+                                onChange={handleFileUpload}
+                                disabled={isParsing}
+                            />
+                            <label
+                                htmlFor="csv-create-upload"
+                                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded cursor-pointer transition-colors flex items-center gap-2"
+                            >
+                                {isParsing ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                                {isParsing ? 'Analyzing...' : 'Upload CSV'}
+                            </label>
+                        </div>
+                    </div>
+
+                    {importData && (
+                        <div className="flex items-center gap-2 px-3 py-2 bg-green-500/10 border border-green-500/20 rounded text-xs text-green-400">
+                            <FileSpreadsheet size={14} />
+                            <span>Loaded <b>{importData.length} rows</b>. Columns auto-generated from CSV headers.</span>
+                        </div>
+                    )}
 
                     {/* Basic Info */}
                     <div className="space-y-4">
@@ -221,11 +339,11 @@ export default function CreateTableModal({ isOpen, onClose }: CreateTableModalPr
                         <button onClick={onClose} className="px-4 py-2 text-sm text-subtle hover:text-white transition-colors">Cancel</button>
                         <button
                             onClick={handleSubmit}
-                            disabled={isPending || !tableName}
+                            disabled={isPending || isImportingData || !tableName}
                             className="px-4 py-2 bg-green-700 hover:bg-green-600 text-white text-sm font-medium rounded flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                         >
-                            {isPending ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-                            <span>Save Table</span>
+                            {(isPending || isImportingData) ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                            <span>{isImportingData ? 'Importing Data...' : 'Save Table'}</span>
                         </button>
                     </div>
                 </div>

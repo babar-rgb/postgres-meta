@@ -1,14 +1,16 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useReactTable, getCoreRowModel, flexRender, ColumnDef, RowSelectionState } from '@tanstack/react-table';
 import { useUpdateCell } from '../hooks/useDb';
-import { useTableData } from '../hooks/useTableData'; // Updated import
-import { Loader2, ChevronLeft, ChevronRight, AlertTriangle, Lock, CheckSquare, Square, FileCode, Plus, Pencil } from 'lucide-react';
+import { useTableData } from '../hooks/useTableData';
+import { Loader2, ChevronLeft, ChevronRight, AlertTriangle, Lock, CheckSquare, Square, FileCode, Plus, Pencil, Download, Upload } from 'lucide-react';
 import ApiDocsDrawer from './ApiDocsDrawer';
 import RowEditorDrawer from './drawers/RowEditorDrawer';
 import FilterBar from './grid/FilterBar';
 import { FilterState, SortState } from '../lib/postgrest';
 import { api } from '../lib/api';
 import { useQueryClient } from '@tanstack/react-query';
+import { exportToCsv } from '../utils/csvHelpers';
+import ImportModal from './modals/ImportModal';
 
 interface DataGridProps {
     tableName: string;
@@ -76,6 +78,7 @@ export default function DataGrid({ tableName }: DataGridProps) {
     // Drawers State
     const [isApiDrawerOpen, setIsApiDrawerOpen] = useState(false);
     const [isRowEditorOpen, setIsRowEditorOpen] = useState(false);
+    const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [editingRow, setEditingRow] = useState<any>(null); // If null -> Create Mode
 
     // Reset page when table changes
@@ -85,6 +88,10 @@ export default function DataGrid({ tableName }: DataGridProps) {
         setFilters([]);
         setSort(null);
     }, [tableName]);
+
+    const handleExport = () => {
+        exportToCsv(data?.rows || [], tableName);
+    };
 
     // Dynamic Columns Generation
     const dynamicCols = useMemo<ColumnDef<any>[]>(() => {
@@ -212,6 +219,25 @@ export default function DataGrid({ tableName }: DataGridProps) {
                 </div>
 
                 <div className="flex items-center gap-3">
+                    <div className="flex items-center border border-[#333] rounded overflow-hidden">
+                        <button
+                            onClick={() => setIsImportModalOpen(true)}
+                            className="px-2 py-1.5 bg-[#151515] hover:bg-[#222] text-subtle hover:text-white border-r border-[#333] transition-colors"
+                            title="Import CSV"
+                        >
+                            <Upload size={14} />
+                        </button>
+                        <button
+                            onClick={handleExport}
+                            className="px-2 py-1.5 bg-[#151515] hover:bg-[#222] text-subtle hover:text-white transition-colors"
+                            title="Export CSV"
+                        >
+                            <Download size={14} />
+                        </button>
+                    </div>
+
+                    <div className="h-4 w-px bg-[#333]" />
+
                     <button
                         onClick={handleCreateRow}
                         className="flex items-center gap-2 px-3 py-1.5 bg-[#222] hover:bg-[#333] text-white border border-[#333] rounded text-xs font-medium transition-all"
@@ -288,9 +314,14 @@ export default function DataGrid({ tableName }: DataGridProps) {
 
             {/* Footer Pagination */}
             <div className="h-10 border-t border-border flex items-center justify-between px-4 bg-[#0C0C0C] text-xs shrink-0">
-                <div className="flex items-center gap-4 text-subtle">
+                <div className="flex items-center gap-4 text-subtle font-mono">
                     <span>{Object.keys(rowSelection).length} selected</span>
-                    <span>Page {pageIndex + 1} of {Math.ceil((data?.totalCount || 0) / pageSize)}</span>
+                    <div className="h-4 w-px bg-[#333]" />
+                    <span>
+                        {data?.totalCount === 0 ? '0' : ((pageIndex * pageSize) + 1).toLocaleString()}
+                        -
+                        {Math.min((pageIndex + 1) * pageSize, (data?.totalCount || 0)).toLocaleString()} of {(data?.totalCount || 0).toLocaleString()}
+                    </span>
                 </div>
                 <div className="flex items-center gap-2">
                     <button
@@ -323,6 +354,12 @@ export default function DataGrid({ tableName }: DataGridProps) {
                 tableName={tableName}
                 initialData={editingRow}
                 columns={dynamicCols} // Pass cols to infer types
+            />
+
+            <ImportModal
+                isOpen={isImportModalOpen}
+                onClose={() => setIsImportModalOpen(false)}
+                tableName={tableName}
             />
         </div>
     );

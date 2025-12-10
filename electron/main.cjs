@@ -12,7 +12,7 @@ function createWindow() {
         backgroundColor: '#050505',
         titleBarStyle: 'hiddenInset',
         webPreferences: {
-            preload: path.join(__dirname, 'preload.js'),
+            preload: path.join(__dirname, 'preload.cjs'),
             nodeIntegration: false,
             contextIsolation: true,
         },
@@ -47,6 +47,7 @@ app.on('window-all-closed', () => {
 
 // 1. Connect
 ipcMain.handle('db-connect', async (event, config) => {
+    console.log('[Electron Main] Received db-connect request:', config);
     try {
         if (dbPool) {
             await dbPool.end();

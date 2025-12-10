@@ -1,5 +1,5 @@
 import { useSql } from '../../hooks/useSql';
-import { Database, HardDrive, Activity, Users } from 'lucide-react';
+import { Database, HardDrive, Activity, Users, AlertCircle } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 // Utils to format bytes
@@ -15,53 +15,76 @@ function formatBytes(bytes: number, decimals = 2) {
 export default function StatCards() {
     const { mutateAsync: runQuery } = useSql();
     const [stats, setStats] = useState({
-        dbSize: '...',
-        activeConnections: '...',
-        tableCount: '...',
-        totalRows: '...'
+        dbSize: { value: '...', error: false },
+        activeConnections: { value: '...', error: false },
+        tableCount: { value: '...', error: false },
+        totalRows: { value: '...', error: false },
+        generalError: null as string | null
     });
 
     useEffect(() => {
         const fetchStats = async () => {
-            try {
+            // Reset error
+            setStats(prev => ({ ...prev, generalError: null }));
+
+            const results = await Promise.allSettled([
                 // 1. DB Size
-                const sizeRes = await runQuery("SELECT pg_database_size(current_database());");
-                const size = sizeRes?.[0]?.pg_database_size;
-
+                runQuery("SELECT pg_database_size(current_database());"),
                 // 2. Active Connections
-                const conRes = await runQuery("SELECT count(*) FROM pg_stat_activity;");
-                const cons = conRes?.[0]?.count;
+                runQuery("SELECT count(*) as count FROM pg_stat_activity;"),
+                // 3. Table Count
+                runQuery("SELECT count(*) as count FROM information_schema.tables WHERE table_schema = 'public';"),
+                // 4. Total Rows
+                runQuery("SELECT sum(n_live_tup) as total_rows FROM pg_stat_user_tables;")
+            ]);
 
-                // 3. Table Count (Public)
-                const tablesRes = await runQuery("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';");
-                const tables = tablesRes?.[0]?.count;
+            const newStats = { ...stats, generalError: null };
 
-                // 4. Total Rows (Approx)
-                const rowsRes = await runQuery(`
-                    SELECT sum(n_live_tup) as total_rows 
-                    FROM pg_stat_user_tables;
-                `);
-                const rows = rowsRes?.[0]?.total_rows || 0;
-
-                setStats({
-                    dbSize: formatBytes(Number(size)),
-                    activeConnections: String(cons),
-                    tableCount: String(tables),
-                    totalRows: String(rows)
-                });
-            } catch (e) {
-                console.error("Failed to fetch dashboard stats", e);
+            // Process DB Size
+            if (results[0].status === 'fulfilled') {
+                const size = results[0].value?.[0]?.pg_database_size;
+                newStats.dbSize = { value: formatBytes(Number(size || 0)), error: false };
+            } else {
+                console.error("DB Size Error:", results[0].reason);
+                newStats.dbSize = { value: 'Err', error: true };
             }
+
+            // Process Active Connections
+            if (results[1].status === 'fulfilled') {
+                const count = results[1].value?.[0]?.count;
+                newStats.activeConnections = { value: String(count || 0), error: false };
+            } else {
+                newStats.activeConnections = { value: 'Err', error: true };
+            }
+
+            // Process Table Count
+            if (results[2].status === 'fulfilled') {
+                const count = results[2].value?.[0]?.count;
+                newStats.tableCount = { value: String(count || 0), error: false };
+            } else {
+                newStats.tableCount = { value: 'Err', error: true };
+            }
+
+            // Process Total Rows
+            if (results[3].status === 'fulfilled') {
+                const rows = results[3].value?.[0]?.total_rows;
+                newStats.totalRows = { value: String(rows || 0), error: false };
+            } else {
+                // This query often fails on permissions, so we can fail gracefully
+                newStats.totalRows = { value: 'N/A', error: true };
+            }
+
+            setStats(newStats);
         };
 
         fetchStats();
-    }, []); // Run once on mount
+    }, []);
 
     const cards = [
-        { label: 'Database Size', value: stats.dbSize, icon: HardDrive, color: 'text-blue-500' },
-        { label: 'Active Connections', value: stats.activeConnections, icon: Activity, color: 'text-green-500' },
-        { label: 'Tables', value: stats.tableCount, icon: Database, color: 'text-purple-500' },
-        { label: 'Total Rows (Est)', value: stats.totalRows, icon: Users, color: 'text-orange-500' },
+        { label: 'Database Size', ...stats.dbSize, icon: HardDrive, color: 'text-blue-500' },
+        { label: 'Active Connections', ...stats.activeConnections, icon: Activity, color: 'text-green-500' },
+        { label: 'Tables', ...stats.tableCount, icon: Database, color: 'text-purple-500' },
+        { label: 'Total Rows (Est)', ...stats.totalRows, icon: Users, color: 'text-orange-500' },
     ];
 
     return (
@@ -72,8 +95,13 @@ export default function StatCards() {
                         <span className="text-xs font-semibold text-subtle uppercase tracking-wider">{card.label}</span>
                         <card.icon size={16} className={`${card.color} opacity-70 group-hover:opacity-100 transition-opacity`} />
                     </div>
-                    <div className="text-2xl font-mono text-white font-medium">
+                    <div className="flex items-center gap-2 text-2xl font-mono text-white font-medium">
                         {card.value}
+                        {card.error && (
+                            <div title="Failed to fetch metric">
+                                <AlertCircle size={16} className="text-red-500" />
+                            </div>
+                        )}
                     </div>
                 </div>
             ))}

@@ -17,7 +17,9 @@ const getAuthToken = () => localStorage.getItem('nexus_auth_token');
 
 // --- Electron Adapter Logic ---
 const isElectron = () => {
-    return typeof window !== 'undefined' && (window as any).electron;
+    const isElec = typeof window !== 'undefined' && (window as any).electron;
+    console.log('[API] isElectron check:', !!isElec, isElec);
+    return isElec;
 };
 
 // Map high-level actions to SQL queries for Electron (Direct DB Access)
@@ -25,26 +27,26 @@ const electronAdapter = {
     fetchTables: async () => {
         const sql = `
             SELECT 
-                t.table_id as id, 
-                t.relname as name, 
-                n.nspname as schema,
-                pg_size_pretty(pg_total_relation_size(t.oid)) as size,
-                t.n_live_tup as live_rows_estimate 
-            FROM pg_stat_user_tables t
-            JOIN pg_namespace n ON n.oid = t.relid
-            WHERE n.nspname = 'public'
-            ORDER BY t.relname;
+                table_name as name,
+                table_schema as schema,
+                table_type as type,
+                0 as id -- info_schema doesn't give OID easily, simplified for now
+            FROM information_schema.tables
+            WHERE table_schema = 'public' 
+              AND (table_type = 'BASE TABLE' OR table_type = 'VIEW')
+            ORDER BY table_name;
         `;
         const res = await (window as any).electron.query(sql);
         if (res.error) throw new Error(res.error);
 
         // Map to TableInfo format
         return res.rows.map((r: any) => ({
-            id: r.id,
+            id: r.name, // Use name as ID for now since info_schema doesn't provide OID
             schema: r.schema,
             name: r.name,
-            bytes: 0, // Simplified for now
-            live_rows_estimate: parseInt(r.live_rows_estimate || 0)
+            type: r.type,
+            bytes: 0,
+            live_rows_estimate: 0
         }));
     },
 
@@ -60,13 +62,24 @@ const electronAdapter = {
         // Ideally we should parse queryParams or pass structured filters.
         // For now, let's just do pagination.
 
-        // TODO: Parse 'queryParams' string (e.g. "?age=gt.10") into WHERE clause
-        // Since queryParams is PostgREST specific syntax, this is hard to map 1:1 without a parser.
-        // For phase 12 MVP, we accept that Filters might not work fully in Desktop mode yet without a parser.
-        // For now, let's just do pagination.
-        if (queryParams) console.warn('[Electron] Filtering not fully implemented yet', queryParams);
+        // Parse queryParams (which are in PostgREST format, e.g., "&order=age.desc")
+        let orderByClause = '';
+        if (queryParams) {
+            // Simple regex to find "order=column.direction"
+            // Note: This is simplified and might not handle complex filters.
+            const sortMatch = queryParams.match(/order=([^.&]+)\.(asc|desc)/);
+            if (sortMatch) {
+                const [, col, dir] = sortMatch;
+                // Basic SQL Injection prevention: Ensure col only contains alphanumeric/underscore
+                if (/^[a-zA-Z0-9_]+$/.test(col)) {
+                    orderByClause = `ORDER BY "${col}" ${dir.toUpperCase()}`;
+                }
+            } else {
+                console.warn('[Electron] Unhandled queryParams:', queryParams);
+            }
+        }
 
-        const sql = `SELECT * FROM "${tableName}" LIMIT ${pageSize} OFFSET ${offset}`;
+        const sql = `SELECT * FROM "${tableName}" ${orderByClause} LIMIT ${pageSize} OFFSET ${offset}`;
         const countSql = `SELECT count(*) as total FROM "${tableName}"`;
 
         const res = await (window as any).electron.query(sql);
@@ -95,6 +108,38 @@ const electronAdapter = {
         const res = await (window as any).electron.query(sql, ids);
         if (res.error) throw new Error(res.error);
         return { success: true };
+    },
+
+    insertRows: async (tableName: string, rows: any[]) => {
+        if (rows.length === 0) return { success: true };
+
+        const keys = Object.keys(rows[0]);
+        const columns = keys.map(k => `"${k}"`).join(', ');
+
+        // Generate ($1, $2), ($3, $4) ...
+        const values: any[] = [];
+        const placeholders: string[] = [];
+
+        let paramIndex = 1;
+        for (const row of rows) {
+            const rowPlaceholders: string[] = [];
+            for (const key of keys) {
+                rowPlaceholders.push(`$${paramIndex}`);
+                values.push(row[key]);
+                paramIndex++;
+            }
+            placeholders.push(`(${rowPlaceholders.join(', ')})`);
+        }
+
+        const sql = `INSERT INTO "${tableName}" (${columns}) VALUES ${placeholders.join(', ')}`;
+
+        try {
+            const res = await (window as any).electron.query(sql, values);
+            if (res.error) throw new Error(res.error);
+            return { success: true, count: rows.length };
+        } catch (err: any) {
+            throw new Error(err.message || "Insert failed");
+        }
     }
 }
 
@@ -125,6 +170,15 @@ function getHeaders(extra?: Record<string, string>) {
 
 // --- Main API Export ---
 export const api = {
+    checkConnection: async () => {
+        if (isElectron()) return electronAdapter.executeQuery('SELECT 1');
+
+        const url = `${getMetaUrl()}/tables?limit=1`;
+        const res = await fetch(url, { headers: getHeaders() });
+        if (!res.ok) throw new Error("Offline");
+        return true;
+    },
+
     fetchTables: async () => {
         if (isElectron()) return electronAdapter.fetchTables();
 
@@ -184,6 +238,18 @@ export const api = {
         const idString = ids.map(id => typeof id === 'string' ? `"${id}"` : id).join(',');
         const url = `${getDataUrl()}/${tableName}?id=in.(${idString})`;
         const res = await fetch(url, { method: 'DELETE', headers: getHeaders() });
+        return handleResponse(res, url);
+    },
+
+    insertRows: async (tableName: string, rows: any[]) => {
+        if (isElectron()) return electronAdapter.insertRows(tableName, rows);
+
+        const url = `${getDataUrl()}/${tableName}`;
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: getHeaders({ 'Prefer': 'return=representation' }),
+            body: JSON.stringify(rows)
+        });
         return handleResponse(res, url);
     }
 };
